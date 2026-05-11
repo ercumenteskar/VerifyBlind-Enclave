@@ -4,6 +4,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- Output dizinini VerifyBlind.Enclave/ dışına taşı — aksi halde MSBuild
+         Enclave projesinin content item'larını kopyalarken recursive path oluşturur. -->
+    <OutputPath>..\..\bin\$(MSBuildProjectName)\$(Configuration)\$(TargetFramework)\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <IntermediateOutputPath>..\..\obj\$(MSBuildProjectName)\$(Configuration)\$(TargetFramework)\</IntermediateOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
