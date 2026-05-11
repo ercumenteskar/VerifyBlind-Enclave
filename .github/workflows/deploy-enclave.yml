@@ -1,0 +1,97 @@
+name: Build EIF & Publish PCR Values
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build Enclave & Extract PCR0
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🏗️ Set up QEMU (for ARM64 builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: 🧠 Download AI Models (Static)
+        run: |
+          mkdir -p Models
+          wget -O Models/w600k_mbf.onnx https://api.verifyblind.com/static/w600k_mbf.onnx
+
+      - name: 🏗️ Prepare Build Context
+        run: |
+          # Dockerfile.enclave was written for the monorepo and expects:
+          #   <context>/VerifyBlind.Enclave/...   (project sources)
+          #   <context>/scripts/enclave-entrypoint.sh
+          # In this standalone repo, the Enclave project IS the repo root,
+          # so we assemble a temporary wrapping directory rather than editing
+          # the Dockerfile (which is also consumed by the monorepo's start-enclave.sh).
+          mkdir -p _ctx/VerifyBlind.Enclave _ctx/scripts
+          rsync -a \
+            --exclude='_ctx' \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='bin' \
+            --exclude='obj' \
+            --exclude='VerifyBlind.Core.Tests' \
+            --exclude='VerifyBlind.Enclave.Tests' \
+            ./ _ctx/VerifyBlind.Enclave/
+          cp scripts/enclave-entrypoint.sh _ctx/scripts/enclave-entrypoint.sh
+          [ -f .dockerignore ] && cp .dockerignore _ctx/.dockerignore || true
+
+      - name: 🕒 Normalize File Timestamps (Deterministic Build)
+        run: |
+          find _ctx -exec touch -t 202601010000 {} +
+
+      - name: 🐳 Build Enclave Docker Image (ARM64)
+        run: |
+          docker build \
+            --platform linux/arm64 \
+            -t localhost/verifyblind-enclave:latest \
+            -f _ctx/VerifyBlind.Enclave/Dockerfile.enclave \
+            _ctx/
+
+      - name: 🏗️ Build EIF (AWS Nitro Image - ARM64 Only)
+        run: |
+          docker run --name nitro-builder \
+            --platform linux/arm64 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd):/workspace \
+            amazonlinux:2 \
+            /bin/bash -c "
+              yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm || true
+              amazon-linux-extras install aws-nitro-enclaves-cli -y
+              yum install aws-nitro-enclaves-cli-devel -y
+              nitro-cli build-enclave --docker-uri localhost/verifyblind-enclave:latest --output-file /workspace/enclave.eif > /workspace/build_output.txt
+            "
+
+          PCR0=$(grep -oP '"PCR0":\s*"\K[^"]+' build_output.txt | head -n 1 | tr -d '\n\r ')
+          echo -n "$PCR0" > pcr0.txt
+          echo "CLEAN_PCR0=$PCR0"
+
+          cat > expected_pcr.json <<EOF
+          {
+            "pcr0": "$PCR0",
+            "built_at": "$(date -u)"
+          }
+          EOF
+
+          echo "PCR0=$PCR0" >> $GITHUB_ENV
+
+          echo "### 🛡️ Build Transparency Report" >> $GITHUB_STEP_SUMMARY
+          echo "Enclave image successfully built on GitHub Infrastructure." >> $GITHUB_STEP_SUMMARY
+          echo "- **PCR0:** \`$PCR0\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: enclave-bundle
+          path: |
+            enclave.eif
+            pcr0.txt
+            expected_pcr.json

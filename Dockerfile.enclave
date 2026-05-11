@@ -1,0 +1,43 @@
+# Microsoft Runtime-Deps Enclave Dockerfile (Most stable for ARM64)
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+
+# Copy projects
+COPY ["VerifyBlind.Enclave/VerifyBlind.Enclave.csproj", "VerifyBlind.Enclave/"]
+COPY ["VerifyBlind.Enclave/VerifyBlind.Core/VerifyBlind.Core.csproj", "VerifyBlind.Enclave/VerifyBlind.Core/"]
+RUN dotnet restore "VerifyBlind.Enclave/VerifyBlind.Enclave.csproj"
+
+# Copy only the necessary source code for Enclave (Core is a subdirectory of Enclave)
+COPY VerifyBlind.Enclave/ VerifyBlind.Enclave/
+COPY scripts/enclave-entrypoint.sh scripts/enclave-entrypoint.sh
+WORKDIR "/src/VerifyBlind.Enclave"
+
+# Publish self-contained
+RUN dotnet publish -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true -o /app/publish
+
+# Use official Microsoft runtime-deps (has all .NET native dependencies)
+FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim AS final
+WORKDIR /app
+ENV ASPNETCORE_ENVIRONMENT=Production
+ENV KMS_MODE=aws
+ENV AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:8001
+ENV KMS__Endpoint=https://127.0.0.1:8000
+ENV KMS__Region=eu-central-1
+
+# Install socat and iproute2 (for loopback setup)
+RUN apt-get update && apt-get install -y socat iproute2 libgomp1 && \
+    rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/*
+
+COPY --from=build /app/publish .
+COPY VerifyBlind.Enclave/Models/w600k_mbf.onnx /app/Models/w600k_mbf.onnx
+COPY VerifyBlind.Enclave/Certificates/ /app/Certificates/
+COPY scripts/enclave-entrypoint.sh /app/entrypoint.sh
+
+# Ensure execute permissions and NORMALIZE TIMESTAMPS for deterministic PCR0
+# This ensures that even the compiled binaries have a fixed date inside the image
+RUN find /app -exec touch -t 202601010000 {} + && \
+    chmod +x /app/entrypoint.sh && \
+    chmod +x /app/VerifyBlind.Enclave
+
+EXPOSE 5101
+ENTRYPOINT ["/app/entrypoint.sh"]
