@@ -8,6 +8,12 @@ public class HandshakeRequest
 {
     [JsonPropertyName("integrity_token")]
     public string IntegrityToken { get; set; } = string.Empty;
+
+    [JsonPropertyName("fcm_token")]
+    public string? FcmToken { get; set; }
+
+    [JsonPropertyName("platform")]
+    public string? Platform { get; set; }
 }
 
 
