@@ -768,4 +768,309 @@ public class EnclaveServiceTests
 
         Assert.True(diag.TotalMs >= 0);
     }
+
+    // ── Handshake (additional) ────────────────────────────────────────────────
+
+    [Fact]
+    public void Handshake_AllChallengesAreValidLivenessActions()
+    {
+        var response = _service.Handshake(new DiagLog());
+        var allowed = new[]
+        {
+            LivenessAction.FaceLeft, LivenessAction.FaceRight, LivenessAction.Blink, LivenessAction.Smile
+        };
+
+        Assert.All(response.Challenges, c => Assert.Contains(c, allowed));
+        Assert.DoesNotContain(LivenessAction.None, response.Challenges);
+    }
+
+    [Fact]
+    public void Handshake_TimestampIsCurrent()
+    {
+        var before = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var response = _service.Handshake(new DiagLog());
+        var after = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        Assert.InRange(response.Timestamp, before, after);
+    }
+
+    // ── ParseMrzDate (additional boundaries) ──────────────────────────────────
+
+    [Fact]
+    public void ParseMrzDate_DobYearExactly30_Returns2030()  // yy=30 is NOT > 30 → 2000s
+        => Assert.Equal(new DateTime(2030, 5, 1), _service.ParseMrzDate("300501"));
+
+    [Fact]
+    public void ParseMrzDate_DobYearExactly31_Returns1931()  // yy=31 IS > 30 → 1900s
+        => Assert.Equal(new DateTime(1931, 5, 1), _service.ParseMrzDate("310501"));
+
+    [Fact]
+    public void ParseMrzDate_InvalidDay_ClampsTo1()
+        => Assert.Equal(new DateTime(1985, 6, 1), _service.ParseMrzDate("850632"));
+
+    [Fact]
+    public void ParseMrzDate_NonNumericInput_ThrowsFormatException()
+    {
+        // HARDENING NOTE: ParseMrzDate guards length and clamps month/day, but a non-numeric
+        // field still throws FormatException from int.Parse rather than returning MinValue.
+        // This test pins current behaviour — making it resilient would be a deliberate change.
+        Assert.Throws<FormatException>(() => _service.ParseMrzDate("ABCDEF"));
+    }
+
+    // ── CheckAgeConstraint (additional boundaries) ────────────────────────────
+
+    [Fact] public void CheckAgeConstraint_RangeFormat_AgeAtLowerBound_ReturnsTrue()
+        => Assert.True(_service.CheckAgeConstraint(18, "18-65"));
+
+    [Fact] public void CheckAgeConstraint_RangeFormat_AgeAtUpperBound_ReturnsFalse()  // upper bound exclusive
+        => Assert.False(_service.CheckAgeConstraint(65, "18-65"));
+
+    [Fact] public void CheckAgeConstraint_RangeFormat_AgeJustUnderUpperBound_ReturnsTrue()
+        => Assert.True(_service.CheckAgeConstraint(64, "18-65"));
+
+    [Fact] public void CheckAgeConstraint_PlusFormat_AgeExactlyAtMin_ReturnsTrue()
+        => Assert.True(_service.CheckAgeConstraint(18, "18+"));
+
+    [Fact] public void CheckAgeConstraint_LeadingTrailingWhitespace_IsTrimmed()
+        => Assert.True(_service.CheckAgeConstraint(20, "  18+  "));
+
+    [Fact] public void CheckAgeConstraint_MalformedRange_Throws()
+        => Assert.Throws<Exception>(() => _service.CheckAgeConstraint(20, "18-25-30"));
+
+    // ── Mask (additional) ─────────────────────────────────────────────────────
+
+    [Fact]
+    public void Mask_ExactlyFourChars_ReturnsStarNotation()
+        => Assert.Equal("**4**", _service.Mask("ABCD"));
+
+    [Fact]
+    public void Mask_FiveChars_KeepsFirstTwoAndLastTwo()
+        => Assert.Equal("AB*DE", _service.Mask("ABCDE"));
+
+    [Fact]
+    public void Mask_TcknLengthValue_OnlyExposesFourDigits()
+    {
+        // An 11-digit TCKN must never have its middle digits exposed in logs.
+        var masked = _service.Mask("12345678901");
+        Assert.Equal("12*******01", masked);
+        Assert.DoesNotContain("345678", masked);
+    }
+
+    // ── ExtractMrzFromDG1 / GetIssuingCountryFromDG1 (additional) ──────────────
+
+    [Fact]
+    public void ExtractMrzFromDG1_EmptyBytes_Throws()
+        => Assert.ThrowsAny<Exception>(() => _service.ExtractMrzFromDG1(Array.Empty<byte>()));
+
+    [Fact]
+    public void ExtractMrzFromDG1_GarbageBytes_Throws()
+        => Assert.ThrowsAny<Exception>(() => _service.ExtractMrzFromDG1(new byte[] { 0x01, 0x02, 0x03 }));
+
+    [Fact]
+    public void GetIssuingCountryFromDG1_GermanCard_ReturnsDEU()
+    {
+        var germanMrz = FakeTurkishTD1Mrz.Replace("TUR", "DEU");
+        Assert.Equal("DEU", _service.GetIssuingCountryFromDG1(BuildDG1Base64(germanMrz)));
+    }
+
+    // ── ParseDG1ToTicket (additional) ─────────────────────────────────────────
+
+    [Fact]
+    public void ParseDG1ToTicket_UnsupportedDocType_Throws()
+    {
+        // 'V' = visa — only P / I / A / C are accepted document types.
+        var visaMrz = "V" + FakeTurkishTD1Mrz.Substring(1);
+        Assert.Throws<Exception>(() => _service.ParseDG1ToTicket(BuildDG1Base64(visaMrz), "pk", "TUR"));
+    }
+
+    [Fact]
+    public void ParseDG1ToTicket_FemaleGender_MappedToF()
+    {
+        // Same card, line 2 gender byte M → F.
+        var femaleMrz = FakeTurkishTD1Mrz.Substring(0, 30)
+            + "9001011F3012311TUR00000000<<<0"
+            + FakeTurkishTD1Mrz.Substring(60);
+        var ticket = _service.ParseDG1ToTicket(BuildDG1Base64(femaleMrz), "pk", "TUR");
+        Assert.Equal("F", ticket.Cinsiyet);
+    }
+
+    [Fact]
+    public void ParseDG1ToTicket_ExpiryDateParsedFromMrz()
+    {
+        var ticket = _service.ParseDG1ToTicket(BuildDG1Base64(FakeTurkishTD1Mrz), "pk", "TUR");
+        Assert.Equal(new DateTime(2030, 12, 31), ticket.GecerlilikTarihi);
+    }
+
+    [Fact]
+    public void ParseDG1ToTicket_NonTurkishCard_LeavesTcknEmpty()
+    {
+        // Even though the optional-data field is numeric, a non-TUR/THA card must not yield a TCKN.
+        var frenchMrz = FakeTurkishTD1Mrz.Replace("TUR", "FRA");
+        var ticket = _service.ParseDG1ToTicket(BuildDG1Base64(frenchMrz), "pk", "FRA");
+        Assert.Equal("", ticket.TCKN);
+        Assert.Equal("FRA", ticket.Uyruk);
+    }
+
+    // ── VerifyDGHashes — DG15 path ────────────────────────────────────────────
+
+    [Fact]
+    public void VerifyDGHashes_Dg15PresentAndHashFound_DoesNotThrow()
+    {
+        var dg1Base64 = BuildDG1Base64(FakeTurkishTD1Mrz);
+        var dg15Bytes = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD };
+        var dg15Base64 = Convert.ToBase64String(dg15Bytes);
+
+        var dg1Hash = SHA256.HashData(Convert.FromBase64String(dg1Base64));
+        var dg15Hash = SHA256.HashData(dg15Bytes);
+
+        // SOD content embeds BOTH hashes (the brute-force scan finds them).
+        var sodContent = new byte[] { 0x00 }
+            .Concat(dg1Hash).Concat(new byte[] { 0xFF })
+            .Concat(dg15Hash).Concat(new byte[] { 0xFF })
+            .ToArray();
+
+        _service.VerifyDGHashes(sodContent, dg1Base64, dg15Base64); // must not throw
+    }
+
+    [Fact]
+    public void VerifyDGHashes_Dg15HashMissing_Throws()
+    {
+        var dg1Base64 = BuildDG1Base64(FakeTurkishTD1Mrz);
+        var dg1Hash = SHA256.HashData(Convert.FromBase64String(dg1Base64));
+
+        // DG1 hash present, DG15 hash absent → DG15 tampering must be rejected.
+        var sodContent = new byte[] { 0x00 }.Concat(dg1Hash).Concat(new byte[64]).ToArray();
+
+        Assert.Throws<Exception>(() =>
+            _service.VerifyDGHashes(sodContent, dg1Base64, Convert.ToBase64String(new byte[] { 0x11, 0x22 })));
+    }
+
+    // ── SearchHashInSOD (additional offsets) ──────────────────────────────────
+
+    [Fact]
+    public void SearchHashInSOD_HashAtOffsetZero_ReturnsTrue()
+    {
+        var hash = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF };
+        var sodContent = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00 };
+        Assert.True(_service.SearchHashInSOD(sodContent, 1, hash));
+    }
+
+    [Fact]
+    public void SearchHashInSOD_HashAtVeryEnd_ReturnsTrue()
+    {
+        var hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("tail"));
+        var sodContent = new byte[16].Concat(hash).ToArray();
+        Assert.True(_service.SearchHashInSOD(sodContent, 1, hash));
+    }
+
+    [Fact]
+    public void SearchHashInSOD_ContentShorterThanHash_ReturnsFalse()
+    {
+        var hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("x")); // 32 bytes
+        Assert.False(_service.SearchHashInSOD(new byte[8], 1, hash));
+    }
+
+    // ── LoginAsync — QR payload, binding & nonce validation (security-critical) ─
+
+    /// <summary>
+    /// Builds a hybrid-encrypted login request whose inner ticket carries <paramref name="innerNonce"/>
+    /// and a pk_hash, paired with a QR payload carrying <paramref name="qrNonce"/>. DecryptWithEnclaveKey
+    /// is mocked to return the real AES key so the Enclave can decrypt the blob and reach the
+    /// binding / nonce-match checks. innerNonce must be at least 8 chars (the service logs nonce[..8]).
+    /// </summary>
+    private LoginRequest BuildLoginRequest(
+        string innerNonce, string qrNonce,
+        string? pkHashOverride = null,
+        string partnerId = "partner-1",
+        bool includeRequestObject = true)
+    {
+        var (_, reqPublicKey) = VerifyBlind.Core.Crypto.CryptoUtils.GenerateRsaKeyPair();
+        var pkHash = pkHashOverride ?? Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(reqPublicKey))).ToLowerInvariant();
+
+        var inner = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            signed_ticket = new SignedTicket
+            {
+                Payload = new TicketPayload { CountryIsoCode = "TUR", GecerlilikTarihi = new DateTime(2030, 1, 1) },
+                Signature = "sig"
+            },
+            nonce = innerNonce,
+            pk_hash = pkHash
+        });
+        var (aesCipher, aesKey, _) = VerifyBlind.Core.Crypto.CryptoUtils.AesEncrypt(inner);
+        _enclaveKeys.Setup(k => k.DecryptWithEnclaveKey(It.IsAny<string>())).Returns(aesKey);
+
+        var encPayload = System.Text.Json.JsonSerializer.Serialize(new { enc_key = "ek", blob = aesCipher });
+
+        var qr = includeRequestObject
+            ? System.Text.Json.JsonSerializer.Serialize(new
+              {
+                  request = new { partner_id = partnerId, public_key = reqPublicKey, nonce = qrNonce }
+              })
+            : System.Text.Json.JsonSerializer.Serialize(new { foo = "no request object here" });
+
+        return new LoginRequest
+        {
+            EncrSignedTicket = encPayload,
+            Nonce = Guid.NewGuid().ToString(),
+            QrPayloadJson = qr
+        };
+    }
+
+    [Fact]
+    public async Task LoginAsync_QrPayloadMissingRequestObject_Throws()
+    {
+        var request = BuildLoginRequest("shared-nonce-123", "shared-nonce-123", includeRequestObject: false);
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("request", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task LoginAsync_QrPayloadMissingPartnerId_Throws()
+    {
+        var request = BuildLoginRequest("shared-nonce-123", "shared-nonce-123", partnerId: "");
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("Zorunlu alanlar", ex.Message);
+    }
+
+    [Fact]
+    public async Task LoginAsync_BindingMismatch_PkHashDoesNotMatchPublicKey_Throws()
+    {
+        // pk_hash signed into the ticket must equal SHA256(QR request public key). A mismatch
+        // means the ticket was not bound to this partner's key — a relay / replay attempt.
+        var request = BuildLoginRequest("shared-nonce-123", "shared-nonce-123",
+            pkHashOverride: "deadbeefdeadbeefdeadbeefdeadbeef");
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("Bağlama", ex.Message);
+    }
+
+    [Fact]
+    public async Task LoginAsync_BindingMissing_EmptyPkHash_Throws()
+    {
+        var request = BuildLoginRequest("shared-nonce-123", "shared-nonce-123", pkHashOverride: "");
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("Bağlama", ex.Message);
+    }
+
+    [Fact]
+    public async Task LoginAsync_NonceMismatch_InnerNonceDiffersFromQrNonce_Throws()
+    {
+        // The nonce signed into the ticket must equal the nonce in the QR request.
+        var request = BuildLoginRequest(innerNonce: "ticket-nonce-aaa", qrNonce: "qr-nonce-bbbbbbb");
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("Nonce uyuşmuyor", ex.Message);
+    }
+
+    [Fact]
+    public async Task LoginAsync_ValidBindingAndNonce_ReachesTicketSignatureVerification()
+    {
+        // With binding + nonce OK the flow advances to ticket signature verification.
+        // Mock KMS to reject the signature → proves the binding/nonce gates were passed.
+        _kms.Setup(k => k.VerifyTicketSignatureAsync(It.IsAny<SignedTicket>())).ReturnsAsync(false);
+        var request = BuildLoginRequest("matching-nonce-1", "matching-nonce-1");
+
+        var ex = await Assert.ThrowsAsync<Exception>(() => _service.LoginAsync(request, new DiagLog()));
+        Assert.Contains("Geçersiz bilet", ex.Message);
+    }
 }

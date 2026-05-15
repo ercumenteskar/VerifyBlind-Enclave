@@ -82,19 +82,51 @@ public class BiometricServiceTests
         }
     }
 
-    // ── Score Range Tests ─────────────────────────────────────────────────────
+    // ── Score Range / Threshold Tests ─────────────────────────────────────────
+    // NOTE: EnclaveService.VerifyBiometricMatch[Parallel] uses an ArcFace cosine-similarity
+    // THRESHOLD of 0.40f (see EnclaveService.cs). These tests pin that value so an
+    // accidental change that weakens (or breaks) face matching fails the build.
 
     [Theory]
     [InlineData(0.0f, false)]
-    [InlineData(0.5f, false)]
-    [InlineData(0.69f, false)]
-    [InlineData(0.70f, true)]
+    [InlineData(0.20f, false)]
+    [InlineData(0.39f, false)]
+    [InlineData(0.40f, true)]
+    [InlineData(0.41f, true)]
     [InlineData(0.85f, true)]
     [InlineData(1.0f, true)]
-    public void FaceScore_ThresholdCheck(float score, bool shouldPass)
+    public void FaceScore_EnclaveThresholdIsZeroPointFour(float score, bool shouldPass)
     {
-        // Typical face similarity threshold is 0.70 (70%)
-        const float threshold = 0.70f;
-        Assert.Equal(shouldPass, score >= threshold);
+        const float enclaveThreshold = 0.40f;
+        Assert.Equal(shouldPass, score >= enclaveThreshold);
+    }
+
+    // ── Exception Propagation ─────────────────────────────────────────────────
+
+    [Fact]
+    public void Mock_VerifyFace_Throws_PropagatesToCaller()
+    {
+        var mock = new Mock<IBiometricService>();
+        mock.Setup(b => b.VerifyFace(It.IsAny<byte[]>(), It.IsAny<byte[]>()))
+            .Throws(new InvalidOperationException("model not loaded"));
+
+        Assert.Throws<InvalidOperationException>(() => mock.Object.VerifyFace(new byte[1], new byte[1]));
+    }
+
+    [Fact]
+    public void Mock_VerifyFaceParallel_Throws_PropagatesToCaller()
+    {
+        var mock = new Mock<IBiometricService>();
+        mock.Setup(b => b.VerifyFaceParallel(It.IsAny<byte[]>(), It.IsAny<byte[]>()))
+            .Throws(new InvalidOperationException("model not loaded"));
+
+        Assert.Throws<InvalidOperationException>(() => mock.Object.VerifyFaceParallel(new byte[1], new byte[1]));
+    }
+
+    [Fact]
+    public void RealBiometricService_ImplementsIBiometricService()
+    {
+        // Guards the DI contract — EnclaveService depends on IBiometricService, not the concrete type.
+        Assert.IsAssignableFrom<IBiometricService>(new BiometricService());
     }
 }

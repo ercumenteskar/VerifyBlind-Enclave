@@ -129,4 +129,96 @@ public class LocalKmsServiceTests
         Assert.True(await svc.VerifyTicketSignatureAsync(new SignedTicket { Payload = ticket, Signature = sig1 }));
         Assert.True(await svc.VerifyTicketSignatureAsync(new SignedTicket { Payload = ticket, Signature = sig2 }));
     }
+
+    // ── HMAC Properties ───────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ComputeHmac_OutputDiffersFromInput()
+    {
+        var svc = Build();
+        Assert.NotEqual("plain-text", await svc.ComputeHmacAsync("plain-text"));
+    }
+
+    [Fact]
+    public async Task ComputeHmac_StaticKey_IdenticalAcrossInstances()
+    {
+        // HmacKey is a static field — person_id / user_id / card_id derivations must be
+        // reproducible across instances (and process restarts), otherwise IDs would not be stable.
+        var a = await Build().ComputeHmacAsync("12345678901_Person_id");
+        var b = await Build().ComputeHmacAsync("12345678901_Person_id");
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public async Task ComputeHmac_LongInput_ReturnsFixed32ByteHash()
+    {
+        var svc = Build();
+        var result = await svc.ComputeHmacAsync(new string('x', 50_000));
+        Assert.Equal(32, Convert.FromBase64String(result).Length);
+    }
+
+    // ── Ticket Signature Forgery Resistance ───────────────────────────────────
+
+    [Fact]
+    public async Task SignTicket_HardcodedCountryKey_VerifiesAcrossInstances()
+    {
+        var ticket = MakeTicket("TUR");
+        var sig = await Build().SignTicketAsync(ticket);
+
+        // TUR uses a hardcoded country key — a signature from one instance must verify on another.
+        var valid = await Build().VerifyTicketSignatureAsync(new SignedTicket { Payload = ticket, Signature = sig });
+        Assert.True(valid);
+    }
+
+    [Fact]
+    public async Task VerifyTicketSignature_TamperedSignatureBytes_ReturnsFalse()
+    {
+        var svc = Build();
+        var ticket = MakeTicket("TUR");
+        var sig = await svc.SignTicketAsync(ticket);
+
+        var sigBytes = Convert.FromBase64String(sig);
+        sigBytes[0] ^= 0xFF;
+
+        var valid = await svc.VerifyTicketSignatureAsync(
+            new SignedTicket { Payload = ticket, Signature = Convert.ToBase64String(sigBytes) });
+        Assert.False(valid);
+    }
+
+    [Fact]
+    public async Task VerifyTicketSignature_GarbageSignature_ReturnsFalseNeverThrows()
+    {
+        var svc = Build();
+        var valid = await svc.VerifyTicketSignatureAsync(
+            new SignedTicket { Payload = MakeTicket("TUR"), Signature = "not-base64!!!" });
+        Assert.False(valid);
+    }
+
+    [Fact]
+    public async Task VerifyTicketSignature_CountryCodeSwapped_ReturnsFalse()
+    {
+        var svc = Build();
+        var sig = await svc.SignTicketAsync(MakeTicket("TUR"));
+
+        // Same identity data, but CountryIsoCode changed → verified against a different
+        // country key → must fail. Prevents lifting a signature onto another country's ticket.
+        var moved = MakeTicket("TUR");
+        moved.CountryIsoCode = "DEU";
+
+        var valid = await svc.VerifyTicketSignatureAsync(new SignedTicket { Payload = moved, Signature = sig });
+        Assert.False(valid);
+    }
+
+    [Fact]
+    public async Task SignTicket_UnknownCountry_RuntimeKeyIsPerInstance()
+    {
+        // Runtime-generated country keys live in-memory per instance (dev-only behaviour) —
+        // a signature from instance A must NOT verify on a fresh instance B.
+        var ticket = MakeTicket("ITA");
+        var sigFromA = await Build().SignTicketAsync(ticket);
+
+        var validOnB = await Build().VerifyTicketSignatureAsync(
+            new SignedTicket { Payload = ticket, Signature = sigFromA });
+        Assert.False(validOnB);
+    }
 }

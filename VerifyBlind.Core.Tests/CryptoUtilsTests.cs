@@ -414,4 +414,180 @@ public class CryptoUtilsTests
     }
 
     #endregion
+
+    #region Error Handling & Malformed Input
+
+    [Fact]
+    public void RsaEncrypt_InvalidPublicKey_Throws()
+        => Assert.ThrowsAny<Exception>(() => CryptoUtils.RsaEncrypt("data", "not-a-valid-key!!!"));
+
+    [Fact]
+    public void RsaDecrypt_NonBase64CipherText_Throws()
+    {
+        var (privateKey, _) = CryptoUtils.GenerateRsaKeyPair();
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.RsaDecrypt("not-base64!!!", privateKey));
+    }
+
+    [Fact]
+    public void RsaDecrypt_InvalidPrivateKey_Throws()
+    {
+        var (_, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        var encrypted = CryptoUtils.RsaEncrypt("data", publicKey);
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.RsaDecrypt(encrypted, "not-base64!!!"));
+    }
+
+    [Fact]
+    public void SignData_InvalidPrivateKey_Throws()
+        => Assert.ThrowsAny<Exception>(() => CryptoUtils.SignData("data", "not-base64!!!"));
+
+    [Fact]
+    public void VerifySignature_NonBase64Signature_ReturnsFalseNeverThrows()
+    {
+        var (_, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        // VerifySignature must swallow all errors and return false — never throw to the caller.
+        Assert.False(CryptoUtils.VerifySignature("data", "not-base64!!!", publicKey));
+    }
+
+    [Fact]
+    public void VerifySignature_InvalidPublicKey_ReturnsFalse()
+    {
+        var (privateKey, _) = CryptoUtils.GenerateRsaKeyPair();
+        var signature = CryptoUtils.SignData("data", privateKey);
+        Assert.False(CryptoUtils.VerifySignature("data", signature, "not-a-valid-key!!!"));
+    }
+
+    [Fact]
+    public void VerifySignature_EmptySignature_ReturnsFalse()
+    {
+        var (_, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        Assert.False(CryptoUtils.VerifySignature("data", "", publicKey));
+    }
+
+    [Fact]
+    public void AesDecrypt_NonBase64_Throws()
+    {
+        var (_, key, _) = CryptoUtils.AesEncrypt("x");
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.AesDecrypt("not-base64!!!", key));
+    }
+
+    [Fact]
+    public void AesDecrypt_BlobShorterThanNoncePlusTag_Throws()
+    {
+        var (_, key, _) = CryptoUtils.AesEncrypt("x");
+        // A 10-byte blob cannot hold a 12-byte GCM nonce + 16-byte auth tag.
+        var tooShort = Convert.ToBase64String(new byte[10]);
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.AesDecrypt(tooShort, key));
+    }
+
+    [Fact]
+    public void AesDecrypt_TamperedAuthTag_Throws()
+    {
+        var (cipherText, key, _) = CryptoUtils.AesEncrypt("auth tag integrity");
+        var bytes = Convert.FromBase64String(cipherText);
+        bytes[^1] ^= 0xFF; // flip last byte — part of the 16-byte GCM auth tag
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.AesDecrypt(Convert.ToBase64String(bytes), key));
+    }
+
+    [Fact]
+    public void AesDecrypt_TamperedNonce_Throws()
+    {
+        var (cipherText, key, _) = CryptoUtils.AesEncrypt("nonce integrity");
+        var bytes = Convert.FromBase64String(cipherText);
+        bytes[0] ^= 0xFF; // flip first byte — part of the 12-byte GCM nonce
+        Assert.ThrowsAny<Exception>(() => CryptoUtils.AesDecrypt(Convert.ToBase64String(bytes), key));
+    }
+
+    #endregion
+
+    #region AES Structure & Large Payloads
+
+    [Fact]
+    public void AesEncrypt_IvIsFirst12BytesOfBlob()
+    {
+        var (cipherText, _, iv) = CryptoUtils.AesEncrypt("nonce placement");
+        var combined = Convert.FromBase64String(cipherText);
+        var ivBytes = Convert.FromBase64String(iv);
+        Assert.Equal(12, ivBytes.Length); // GCM standard nonce size
+        Assert.Equal(ivBytes, combined.Take(12).ToArray());
+    }
+
+    [Fact]
+    public void AesEncryptDecrypt_LargePayload_RoundTrips()
+    {
+        var plainText = new string('Z', 100_000);
+        var (cipherText, key, _) = CryptoUtils.AesEncrypt(plainText);
+        Assert.Equal(plainText, CryptoUtils.AesDecrypt(cipherText, key));
+    }
+
+    #endregion
+
+    #region ImportPublicKey — Format Variants
+
+    [Fact]
+    public void ImportPublicKey_Pkcs1Format_Success()
+    {
+        using var source = RSA.Create(2048);
+        var pkcs1Base64 = Convert.ToBase64String(source.ExportRSAPublicKey());
+
+        using var rsa = RSA.Create();
+        Assert.True(CryptoUtils.ImportPublicKey(rsa, pkcs1Base64));
+        Assert.Equal(2048, rsa.KeySize);
+    }
+
+    [Fact]
+    public void ImportPublicKey_EmptyString_ReturnsFalse()
+    {
+        using var rsa = RSA.Create();
+        Assert.False(CryptoUtils.ImportPublicKey(rsa, ""));
+    }
+
+    [Fact]
+    public void ImportPublicKey_PrivateKeyInsteadOfPublic_ReturnsFalse()
+    {
+        var (privateKey, _) = CryptoUtils.GenerateRsaKeyPair();
+        using var rsa = RSA.Create();
+        // A PKCS#8 private key is neither valid SPKI nor PKCS#1 public key material.
+        Assert.False(CryptoUtils.ImportPublicKey(rsa, privateKey));
+    }
+
+    #endregion
+
+    #region GetPublicKeyHash — Correctness
+
+    [Fact]
+    public void GetPublicKeyHash_MatchesManualSha256OfKeyBytes()
+    {
+        var (_, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        var expected = Convert.ToHexString(
+            SHA256.HashData(Convert.FromBase64String(publicKey))).ToLowerInvariant();
+        Assert.Equal(expected, CryptoUtils.GetPublicKeyHash(publicKey));
+    }
+
+    [Fact]
+    public void GetPublicKeyHash_WhitespacePaddedKey_SameAsTrimmed()
+    {
+        var (_, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        Assert.Equal(
+            CryptoUtils.GetPublicKeyHash(publicKey),
+            CryptoUtils.GetPublicKeyHash("  \n" + publicKey + "\r\n  "));
+    }
+
+    #endregion
+
+    #region OAEP-SHA256 vs OAEP-SHA1 Incompatibility
+
+    [Fact]
+    public void RsaEncrypt_Sha256Ciphertext_NotDecryptableWithSha1Padding()
+    {
+        var (privateKey, publicKey) = CryptoUtils.GenerateRsaKeyPair();
+        var sha256Cipher = CryptoUtils.RsaEncrypt("payload", publicKey);
+
+        using var rsa = RSA.Create();
+        rsa.ImportPkcs8PrivateKey(Convert.FromBase64String(privateKey), out _);
+        // OAEP padding is hash-bound: SHA-256 ciphertext must fail SHA-1 unwrapping.
+        Assert.ThrowsAny<CryptographicException>(() =>
+            rsa.Decrypt(Convert.FromBase64String(sha256Cipher), RSAEncryptionPadding.OaepSHA1));
+    }
+
+    #endregion
 }

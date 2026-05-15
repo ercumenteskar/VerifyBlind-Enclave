@@ -139,4 +139,75 @@ public class EnclaveControllerTests
         var json = System.Text.Json.JsonSerializer.Serialize(result.Value);
         Assert.Contains("error", json);
     }
+
+    // ── GetPublicKey ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public void GetPublicKey_ReturnsEnclavePublicKeyJson()
+    {
+        var result = Assert.IsType<OkObjectResult>(_controller.GetPublicKey());
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Value);
+        Assert.Contains("public_key", json);
+        Assert.Contains("fake-pub-key", json);
+    }
+
+    // ── Handshake (additional) ────────────────────────────────────────────────
+
+    [Fact]
+    public void Handshake_ResponseIncludesEnclavePubKeyAndDiag()
+    {
+        var result = Assert.IsType<OkObjectResult>(_controller.Handshake());
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Value);
+        Assert.Contains("enclave_pub_key", json);
+        Assert.Contains("enclave_diag", json);
+        Assert.Contains("timestamp", json);
+    }
+
+    [Fact]
+    public void LoginHandshake_ResponseIncludesEnclavePubKey()
+    {
+        var result = Assert.IsType<OkObjectResult>(_controller.LoginHandshake());
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Value);
+        Assert.Contains("enclave_pub_key", json);
+        Assert.Contains("attestation_document", json);
+    }
+
+    // ── Status-code mapping: 400 vs 500 ───────────────────────────────────────
+
+    [Fact]
+    public async Task Register_NullRequest_UnexpectedError_Returns500()
+    {
+        // A null request bypasses RegistrationException wrapping and surfaces as
+        // NullReferenceException → controller must map it to 500, NOT 400 (which is
+        // reserved for client-data failures).
+        var result = Assert.IsType<ObjectResult>(await _controller.Register(null!));
+        Assert.Equal(500, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task Register_RegistrationException_Returns400WithEnclaveDiag()
+    {
+        _enclaveKeys.Setup(k => k.DecryptWithEnclaveKey(It.IsAny<string>()))
+            .Throws(new RegistrationException(RegistrationStep.RsaDecrypt, "boom"));
+
+        var result = Assert.IsType<ObjectResult>(
+            await _controller.Register(new RegistrationRequest { EncryptedKey = "k", AesBlob = "b" }));
+        Assert.Equal(400, result.StatusCode);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(result.Value);
+        Assert.Contains("enclave_diag", json);
+    }
+
+    [Fact]
+    public async Task Login_MalformedEncrSignedTicket_Returns400()
+    {
+        // Non-JSON ticket → service throws InvalidOperationException → 400 (client data error).
+        var request = new LoginRequest
+        {
+            EncrSignedTicket = "not-json-at-all",
+            Nonce = Guid.NewGuid().ToString()
+        };
+        var result = Assert.IsType<ObjectResult>(await _controller.Login(request));
+        Assert.Equal(400, result.StatusCode);
+    }
 }
