@@ -19,8 +19,7 @@ public class EnclaveKeyServiceTests
         _nsm.Setup(n => n.GetAttestationDocument(It.IsAny<byte[]>(), It.IsAny<byte[]?>(), It.IsAny<byte[]?>()))
             .Returns(new byte[] { 0x01, 0x02, 0x03, 0x04 });
 
-        // useStaticKeys=true → uses hardcoded test keys
-        _service = new EnclaveKeyService(_nsm.Object, useStaticKeys: true);
+        _service = new EnclaveKeyService(_nsm.Object);
     }
 
     // ── Key Material ──────────────────────────────────────────────────────────
@@ -30,13 +29,6 @@ public class EnclaveKeyServiceTests
     {
         var pubKey = _service.GetEnclavePublicKey();
         Assert.NotEmpty(pubKey);
-    }
-
-    [Fact]
-    public void GetEnclaveIdentitySignature_ReturnsNonEmpty()
-    {
-        var sig = _service.GetEnclaveIdentitySignature();
-        Assert.NotEmpty(sig);
     }
 
     [Fact]
@@ -89,31 +81,6 @@ public class EnclaveKeyServiceTests
 
         var decrypted = _service.DecryptWithEnclaveKey(cipherText);
         Assert.Equal("hello-enclave", decrypted);
-    }
-
-    // ── Dynamic keys (useStaticKeys = false) ───────────────────────────────────
-
-    [Fact]
-    public void Constructor_DynamicKeys_GeneratesDifferentPublicKeys()
-    {
-        var nsm = new Mock<INsmProvider>();
-        nsm.Setup(n => n.GetAttestationDocument(It.IsAny<byte[]>(), It.IsAny<byte[]?>(), It.IsAny<byte[]?>()))
-            .Returns(Array.Empty<byte>());
-
-        var svc1 = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
-        var svc2 = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
-
-        Assert.NotEqual(svc1.GetEnclavePublicKey(), svc2.GetEnclavePublicKey());
-    }
-
-    [Fact]
-    public void Constructor_DynamicKeys_SignVerifyWorks()
-    {
-        var nsm = new Mock<INsmProvider>();
-        var svc = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
-
-        var sig = svc.SignDataWithEnclaveKey("dynamic-data");
-        Assert.True(svc.VerifyEnclaveSignature("dynamic-data", sig));
     }
 
     // ── Attestation ───────────────────────────────────────────────────────────
@@ -202,60 +169,28 @@ public class EnclaveKeyServiceTests
         Assert.True(_service.VerifyEnclaveSignature("", sig));
     }
 
-    [Fact]
-    public void GetEnclaveIdentitySignature_IsStableAcrossCalls()
-    {
-        // The identity signature is computed once in the constructor — it must not change.
-        Assert.Equal(_service.GetEnclaveIdentitySignature(), _service.GetEnclaveIdentitySignature());
-    }
-
-    // ── Static vs Dynamic Key Material ────────────────────────────────────────
+    // ── Per-Instance Key Material ─────────────────────────────────────────────
 
     [Fact]
-    public void StaticKeys_TwoInstances_ProduceIdenticalPublicKey()
+    public void DecryptWithEnclaveKey_DynamicKey_RoundTrips()
     {
         var nsm = new Mock<INsmProvider>();
-        var a = new EnclaveKeyService(nsm.Object, useStaticKeys: true);
-        var b = new EnclaveKeyService(nsm.Object, useStaticKeys: true);
-
-        // Static mode uses hardcoded dev keys — every instance is identical.
-        Assert.Equal(a.GetEnclavePublicKey(), b.GetEnclavePublicKey());
-    }
-
-    [Fact]
-    public void DynamicKeys_DecryptWithEnclaveKey_RoundTrips()
-    {
-        var nsm = new Mock<INsmProvider>();
-        var svc = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
+        var svc = new EnclaveKeyService(nsm.Object);
 
         var cipher = CryptoUtils.RsaEncrypt("dynamic-secret", svc.GetEnclavePublicKey());
         Assert.Equal("dynamic-secret", svc.DecryptWithEnclaveKey(cipher));
     }
 
-    [Fact]
-    public void DynamicKeys_CrossInstanceSignature_DoesNotVerify()
-    {
-        var nsm = new Mock<INsmProvider>();
-        var a = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
-        var b = new EnclaveKeyService(nsm.Object, useStaticKeys: false);
-
-        var sigFromA = a.SignDataWithEnclaveKey("payload");
-        // Dynamic keys are unique per instance — A's signature must not verify on B.
-        Assert.False(b.VerifyEnclaveSignature("payload", sigFromA));
-    }
-
     // ── Program.cs DI Behaviour ───────────────────────────────────────────────
-    // Program.cs:35 registers IEnclaveKeyService → EnclaveKeyService with no factory.
-    // The constructor's `bool useStaticKeys = true` default flows through Microsoft DI
-    // (which substitutes ConstantCallSite from parameter.DefaultValue for unresolvable
-    // primitives), so EVERY environment — including production — instantiates static
-    // mode unless the registration is changed to an explicit factory. These tests pin
-    // that current reality and will turn red the moment Program.cs is fixed.
+    // Program.cs registers IEnclaveKeyService → EnclaveKeyService. The constructor
+    // generates a fresh RSA-2048 key pair every time the service is built, so the
+    // hardcoded dev keys from the public repo are no longer in play. These tests
+    // pin that new reality.
 
     [Fact]
-    public void DiContainer_MirroringProgramCs_InstantiatesInStaticMode()
+    public void DiContainer_MirroringProgramCs_GeneratesFreshKeyPair()
     {
-        // Arrange: replicate Program.cs:27,35 exactly.
+        // Arrange: replicate Program.cs's IEnclaveKeyService registration.
         var services = new ServiceCollection();
         services.AddSingleton<INsmProvider>(_ =>
         {
@@ -269,20 +204,18 @@ public class EnclaveKeyServiceTests
         using var sp = services.BuildServiceProvider();
         var diInstance = sp.GetRequiredService<IEnclaveKeyService>();
 
-        // Assert: the public key returned by the DI-built instance equals the public key
-        // of an explicit `useStaticKeys: true` construction — proving the DI container
-        // fell back to the constructor's default and IS using the hardcoded static keys.
-        var staticReference = new EnclaveKeyService(
-            Mock.Of<INsmProvider>(), useStaticKeys: true).GetEnclavePublicKey();
+        // A separately-constructed instance must produce a DIFFERENT public key —
+        // proving no static/hardcoded material is in use.
+        var standalone = new EnclaveKeyService(Mock.Of<INsmProvider>()).GetEnclavePublicKey();
 
-        Assert.Equal(staticReference, diInstance.GetEnclavePublicKey());
+        Assert.NotEqual(standalone, diInstance.GetEnclavePublicKey());
     }
 
     [Fact]
-    public void DiContainer_MirroringProgramCs_DoesNotProduceDynamicKeys()
+    public void DiContainer_MirroringProgramCs_ProducesUniqueKeysPerContainer()
     {
-        // Two separate DI containers must return IDENTICAL public keys, which can only
-        // happen in static mode (dynamic mode generates fresh RSA per instance).
+        // Two separate DI containers must return DIFFERENT public keys —
+        // dynamic mode generates fresh RSA per instance.
         IEnclaveKeyService Build()
         {
             var s = new ServiceCollection();
@@ -291,6 +224,6 @@ public class EnclaveKeyServiceTests
             return s.BuildServiceProvider().GetRequiredService<IEnclaveKeyService>();
         }
 
-        Assert.Equal(Build().GetEnclavePublicKey(), Build().GetEnclavePublicKey());
+        Assert.NotEqual(Build().GetEnclavePublicKey(), Build().GetEnclavePublicKey());
     }
 }

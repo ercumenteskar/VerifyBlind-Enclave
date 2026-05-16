@@ -18,7 +18,6 @@ public class EnclaveServiceTests
     {
         // Setup realistic defaults
         _enclaveKeys.Setup(k => k.GetEnclavePublicKey()).Returns("fake-pub-key");
-        _enclaveKeys.Setup(k => k.GetEnclaveIdentitySignature()).Returns("fake-identity-sig");
         _enclaveKeys.Setup(k => k.SignDataWithEnclaveKey(It.IsAny<string>())).Returns("fake-sig");
         _enclaveKeys.Setup(k => k.GetAttestationDocument()).Returns("fake-attestation");
 

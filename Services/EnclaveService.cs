@@ -1440,7 +1440,7 @@ throw;
             }
         }
         
-        Console.WriteLine($"[Enclave] UYARI: DG{dgNumber} hash SOD içeriğinde bulunamadı (Beklenen: {expectedHex.Substring(0, 16)}...)");
+        Console.WriteLine($"[Enclave] UYARI: DG{dgNumber} hash SOD içeriğinde bulunamadı (Beklenen: {expectedHex[..Math.Min(16, expectedHex.Length)]}...)");
         return false;
     }
 
