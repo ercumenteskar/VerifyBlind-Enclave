@@ -16,7 +16,11 @@ COPY scripts/enclave-entrypoint.sh scripts/enclave-entrypoint.sh
 WORKDIR "/src/VerifyBlind.Enclave"
 
 # Publish self-contained (--no-restore: restore already done above with locked deps)
-RUN dotnet publish -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true --no-restore -o /app/publish
+RUN dotnet publish -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true --no-restore -o /app/publish \
+    # Normalize output file timestamps: MSBuild sets output mtimes to the current time even
+    # with Deterministic=true. The COPY --from=build layer includes those mtimes, so we must
+    # normalize them HERE (before the copy) for the final layer to be deterministic.
+    && find /app/publish -exec touch -t 202601010000 {} +
 
 # runtime-deps digest: mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim @ 2026-05-23
 FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim@sha256:7bfab88c5e62c7bd5c94e51cc6657d82942d0e4629845249f3560730baa398e0 AS final
@@ -29,16 +33,16 @@ ENV KMS__Region=eu-central-1
 
 # Install socat and iproute2 (for loopback setup) — exact versions pinned for reproducibility.
 # If a security update bumps these versions the build will fail loudly; update pins consciously.
-# Fallback to snapshot.debian.org for long-term archive: https://snapshot.debian.org/archive/debian/
-# Normalize dpkg/alternatives timestamps after install: dpkg writes /var/lib/dpkg/info/*.list
-# and /var/lib/dpkg/status with the install-time timestamp — strip these for layer determinism.
+# Nuclear timestamp normalization after install: apt/dpkg writes current-time mtimes to ALL
+# touched paths (/var/lib/dpkg, /usr/share/doc/pkg/, /etc/iproute2/, /usr/lib/..., etc).
+# We touch the entire non-virtual FS so no install-time timestamp leaks into the layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       socat=1.7.4.4-2 \
       iproute2=6.1.0-3 \
       libgomp1=12.2.0-14+deb12u1 \
     && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/* \
-    && find /var/lib/dpkg /etc/alternatives /var/lib/update-alternatives \
-       -exec touch -t 202601010000 {} + 2>/dev/null || true
+    && find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o \
+       -exec touch -t 202601010000 {} + 2>/dev/null; true
 
 COPY --from=build /app/publish .
 COPY VerifyBlind.Enclave/Models/w600k_mbf.onnx /app/Models/w600k_mbf.onnx
