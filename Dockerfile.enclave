@@ -1,22 +1,25 @@
-# Microsoft Runtime-Deps Enclave Dockerfile (Most stable for ARM64)
-FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+# Microsoft Runtime-Deps Enclave Dockerfile (Reproducible — pinned digests)
+# sdk digest: mcr.microsoft.com/dotnet/sdk:9.0 @ 2026-05-23
+FROM mcr.microsoft.com/dotnet/sdk:9.0@sha256:c6a1f83156998790d89bfaf51f891aeab539bfa0792f7ddc19b63ba49b2ed8f2 AS build
 WORKDIR /src
 
 # Copy projects
 COPY ["VerifyBlind.Enclave/VerifyBlind.Enclave.csproj", "VerifyBlind.Enclave/"]
 COPY ["VerifyBlind.Enclave/VerifyBlind.Core/VerifyBlind.Core.csproj", "VerifyBlind.Enclave/VerifyBlind.Core/"]
-RUN dotnet restore "VerifyBlind.Enclave/VerifyBlind.Enclave.csproj"
+COPY ["VerifyBlind.Enclave/packages.lock.json", "VerifyBlind.Enclave/"]
+COPY ["VerifyBlind.Enclave/VerifyBlind.Core/packages.lock.json", "VerifyBlind.Enclave/VerifyBlind.Core/"]
+RUN dotnet restore "VerifyBlind.Enclave/VerifyBlind.Enclave.csproj" -r linux-arm64 --locked-mode
 
 # Copy only the necessary source code for Enclave (Core is a subdirectory of Enclave)
 COPY VerifyBlind.Enclave/ VerifyBlind.Enclave/
 COPY scripts/enclave-entrypoint.sh scripts/enclave-entrypoint.sh
 WORKDIR "/src/VerifyBlind.Enclave"
 
-# Publish self-contained
-RUN dotnet publish -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true -o /app/publish
+# Publish self-contained (--no-restore: restore already done above with locked deps)
+RUN dotnet publish -c Release -r linux-arm64 --self-contained true -p:PublishSingleFile=true --no-restore -o /app/publish
 
-# Use official Microsoft runtime-deps (has all .NET native dependencies)
-FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim AS final
+# runtime-deps digest: mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim @ 2026-05-23
+FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim@sha256:7bfab88c5e62c7bd5c94e51cc6657d82942d0e4629845249f3560730baa398e0 AS final
 WORKDIR /app
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV KMS_MODE=aws
@@ -24,17 +27,24 @@ ENV AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:8001
 ENV KMS__Endpoint=https://127.0.0.1:8000
 ENV KMS__Region=eu-central-1
 
-# Install socat and iproute2 (for loopback setup)
-RUN apt-get update && apt-get install -y socat iproute2 libgomp1 && \
-    rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/*
+# Install socat and iproute2 (for loopback setup) — exact versions pinned for reproducibility.
+# If a security update bumps these versions the build will fail loudly; update pins consciously.
+# Fallback to snapshot.debian.org for long-term archive: https://snapshot.debian.org/archive/debian/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      socat=1.7.4.4-2 \
+      iproute2=6.1.0-3 \
+      libgomp1=12.2.0-14+deb12u1 \
+    && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/*
 
 COPY --from=build /app/publish .
 COPY VerifyBlind.Enclave/Models/w600k_mbf.onnx /app/Models/w600k_mbf.onnx
 COPY VerifyBlind.Enclave/Certificates/ /app/Certificates/
 COPY scripts/enclave-entrypoint.sh /app/entrypoint.sh
 
-# Ensure execute permissions and NORMALIZE TIMESTAMPS for deterministic PCR0
-# This ensures that even the compiled binaries have a fixed date inside the image
+# Verify canonical model hash (SHA256) — fails loudly if model bytes differ
+RUN echo "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f  /app/Models/w600k_mbf.onnx" | sha256sum -c -
+
+# NORMALIZE TIMESTAMPS for deterministic PCR0 — must run after all COPY steps
 RUN find /app -exec touch -t 202601010000 {} + && \
     chmod +x /app/entrypoint.sh && \
     chmod +x /app/VerifyBlind.Enclave

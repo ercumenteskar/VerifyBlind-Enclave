@@ -113,18 +113,14 @@ public static class CryptoUtils
         {
             using var rsa = RSA.Create();
             if (!ImportPublicKey(rsa, publicKeyBase64))
-            {
-                Console.WriteLine("[CryptoUtils] Failed to load public key.");
                 return false;
-            }
 
             var dataBytes = Encoding.UTF8.GetBytes(data);
             var signatureBytes = Convert.FromBase64String(signature);
             return rsa.VerifyData(dataBytes, signatureBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
         }
-        catch (Exception ex)
+        catch
         {
-             Console.WriteLine($"[CryptoUtils] Verify Error: {ex.Message}");
              return false;
         }
     }

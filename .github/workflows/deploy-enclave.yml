@@ -8,19 +8,14 @@ on:
 jobs:
   build:
     name: Build Enclave & Extract PCR0
-    runs-on: ubuntu-latest
+    # Native arm64 runner — no QEMU; matches Graviton EC2 architecture
+    runs-on: ubuntu-24.04-arm
 
     steps:
-      - name: 📥 Checkout Code
+      - name: 📥 Checkout Code (with LFS for ONNX model)
         uses: actions/checkout@v4
-
-      - name: 🏗️ Set up QEMU (for ARM64 builds)
-        uses: docker/setup-qemu-action@v3
-
-      - name: 🧠 Download AI Models (Static)
-        run: |
-          mkdir -p Models
-          wget -O Models/w600k_mbf.onnx https://api.verifyblind.com/static/w600k_mbf.onnx
+        with:
+          lfs: true
 
       - name: 🏗️ Prepare Build Context
         run: |
@@ -55,37 +50,49 @@ jobs:
             -f _ctx/VerifyBlind.Enclave/Dockerfile.enclave \
             _ctx/
 
-      - name: 🏗️ Build EIF (AWS Nitro Image - ARM64 Only)
+      - name: 🏗️ Build EIF (AWS Nitro Image - ARM64)
         run: |
-          docker run --name nitro-builder \
-            --platform linux/arm64 \
+          # amazonlinux:2 pinned by manifest-list digest (2026-05-23)
+          docker run --rm --name nitro-builder \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $(pwd):/workspace \
-            amazonlinux:2 \
+            amazonlinux:2@sha256:74e5c80ad36e6ef0f6fd4a55bb3cc969c05dec6b9dc27fdfa68c8e77264901f9 \
             /bin/bash -c "
-              yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm || true
               amazon-linux-extras install aws-nitro-enclaves-cli -y
-              yum install aws-nitro-enclaves-cli-devel -y
+              yum install -y aws-nitro-enclaves-cli-devel
               nitro-cli build-enclave --docker-uri localhost/verifyblind-enclave:latest --output-file /workspace/enclave.eif > /workspace/build_output.txt
+              nitro-cli --version > /workspace/nitro_cli_version.txt
             "
 
+          NITRO_VER=$(cat nitro_cli_version.txt 2>/dev/null || echo "unknown")
           PCR0=$(grep -oP '"PCR0":\s*"\K[^"]+' build_output.txt | head -n 1 | tr -d '\n\r ')
           echo -n "$PCR0" > pcr0.txt
           echo "CLEAN_PCR0=$PCR0"
+          echo "NITRO_CLI_VER=$NITRO_VER"
 
           cat > expected_pcr.json <<EOF
           {
             "pcr0": "$PCR0",
-            "built_at": "$(date -u)"
+            "built_at": "$(date -u)",
+            "nitro_cli_version": "$NITRO_VER",
+            "git_commit": "${{ github.sha }}"
           }
           EOF
 
           echo "PCR0=$PCR0" >> $GITHUB_ENV
+          echo "NITRO_VER=$NITRO_VER" >> $GITHUB_ENV
 
           echo "### 🛡️ Build Transparency Report" >> $GITHUB_STEP_SUMMARY
-          echo "Enclave image successfully built on GitHub Infrastructure." >> $GITHUB_STEP_SUMMARY
+          echo "Enclave image built on GitHub Infrastructure (native arm64)." >> $GITHUB_STEP_SUMMARY
           echo "- **PCR0:** \`$PCR0\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **nitro-cli:** \`$NITRO_VER\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Model hash (w600k_mbf.onnx):** \`9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Hash verified inside Docker build (sha256sum -c). Build would fail if model bytes differ." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> **Pin nitro-cli version:** Once \`$NITRO_VER\` is confirmed stable, replace the" >> $GITHUB_STEP_SUMMARY
+          echo "> \`amazon-linux-extras install\` line with \`yum install -y aws-nitro-enclaves-cli-<VER>\`." >> $GITHUB_STEP_SUMMARY
 
       - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -95,3 +102,4 @@ jobs:
             enclave.eif
             pcr0.txt
             expected_pcr.json
+            nitro_cli_version.txt
