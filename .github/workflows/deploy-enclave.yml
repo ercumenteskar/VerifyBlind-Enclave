@@ -44,7 +44,9 @@ jobs:
 
       - name: 🐳 Build Enclave Docker Image (ARM64)
         run: |
-          docker build \
+          # SOURCE_DATE_EPOCH=0 makes BuildKit embed epoch-0 in the image config timestamp,
+          # ensuring the image ID (and downstream PCR0) is deterministic across runs.
+          SOURCE_DATE_EPOCH=0 docker build \
             --platform linux/arm64 \
             -t localhost/verifyblind-enclave:latest \
             -f _ctx/VerifyBlind.Enclave/Dockerfile.enclave \
