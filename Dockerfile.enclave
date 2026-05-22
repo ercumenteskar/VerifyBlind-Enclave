@@ -8,7 +8,7 @@ COPY ["VerifyBlind.Enclave/VerifyBlind.Enclave.csproj", "VerifyBlind.Enclave/"]
 COPY ["VerifyBlind.Enclave/VerifyBlind.Core/VerifyBlind.Core.csproj", "VerifyBlind.Enclave/VerifyBlind.Core/"]
 COPY ["VerifyBlind.Enclave/packages.lock.json", "VerifyBlind.Enclave/"]
 COPY ["VerifyBlind.Enclave/VerifyBlind.Core/packages.lock.json", "VerifyBlind.Enclave/VerifyBlind.Core/"]
-RUN dotnet restore "VerifyBlind.Enclave/VerifyBlind.Enclave.csproj" -r linux-arm64 --locked-mode
+RUN dotnet restore "VerifyBlind.Enclave/VerifyBlind.Enclave.csproj" -r linux-arm64
 
 # Copy only the necessary source code for Enclave (Core is a subdirectory of Enclave)
 COPY VerifyBlind.Enclave/ VerifyBlind.Enclave/
