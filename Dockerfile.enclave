@@ -40,7 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       socat=1.7.4.4-2 \
       iproute2=6.1.0-3 \
       libgomp1=12.2.0-14+deb12u1 \
-    && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/* \
+    && rm -rf /var/lib/apt/lists/* /var/lib/apt/periodic/* /var/log/apt/* /var/log/dpkg.log /var/log/alternatives.log /var/cache/apt/* \
+    && sed -i '/^Installed-Time:/d' /var/lib/dpkg/status \
     && find / \( -path /proc -o -path /sys -o -path /dev \) -prune -o \
        -exec touch -t 202601010000 {} + 2>/dev/null; true
 
