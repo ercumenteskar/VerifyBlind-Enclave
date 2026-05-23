@@ -148,6 +148,30 @@ jobs:
           echo "PCR0=$PCR0" >> $GITHUB_ENV
           echo "NITRO_VER=$NITRO_VER" >> $GITHUB_ENV
 
+      - name: 🔐 Assert PCR0 matches expected_pcr0 (drift detection)
+        run: |
+          if [ ! -f expected_pcr0 ]; then
+            echo "::warning::expected_pcr0 file not present; skipping drift assertion."
+            exit 0
+          fi
+          EXPECTED=$(tr -d '[:space:]' < expected_pcr0 | tr 'A-Z' 'a-z')
+          ACTUAL=$(echo "$PCR0" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+          if [ "$EXPECTED" = "$ACTUAL" ]; then
+            echo "✅ PCR0 matches expected: $ACTUAL"
+            echo "### ✅ PCR0 Drift Check: PASS" >> $GITHUB_STEP_SUMMARY
+            echo "Built \`$ACTUAL\` matches \`expected_pcr0\`." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "::error::PCR0 DRIFT! built=$ACTUAL expected=$EXPECTED"
+            echo "### ❌ PCR0 Drift Check: FAIL" >> $GITHUB_STEP_SUMMARY
+            echo "- **Expected:** \`$EXPECTED\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Built:**    \`$ACTUAL\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Either a build input changed unintentionally (regression) or this is an" >> $GITHUB_STEP_SUMMARY
+            echo "intended version bump. If intended: sign the new PCR0, update" >> $GITHUB_STEP_SUMMARY
+            echo "\`pcr0_signatures.json\` in the API repo, and update \`expected_pcr0\` here." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
           echo "### 🛡️ Build Transparency Report" >> $GITHUB_STEP_SUMMARY
           echo "Enclave image built on GitHub Infrastructure (native arm64)." >> $GITHUB_STEP_SUMMARY
           echo "- **PCR0:** \`$PCR0\`" >> $GITHUB_STEP_SUMMARY
