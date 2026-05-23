@@ -32,11 +32,16 @@ ENV KMS__Endpoint=https://127.0.0.1:8000
 ENV KMS__Region=eu-central-1
 
 # Install socat and iproute2 (for loopback setup) — exact versions pinned for reproducibility.
-# If a security update bumps these versions the build will fail loudly; update pins consciously.
+# snapshot.debian.org freezes the package index at a specific timestamp so transitive
+# dependencies (libelf1, libcap2, libmnl0, etc.) are byte-identical across all CI runs.
+# check-valid-until=no: snapshot archives have expired Valid-Until headers by design.
 # Nuclear timestamp normalization after install: apt/dpkg writes current-time mtimes to ALL
 # touched paths (/var/lib/dpkg, /usr/share/doc/pkg/, /etc/iproute2/, /usr/lib/..., etc).
 # We touch the entire non-virtual FS so no install-time timestamp leaks into the layer.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260101T000000Z/ bookworm main' > /etc/apt/sources.list \
+    && echo 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260101T000000Z/ bookworm-security main' >> /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
       socat=1.7.4.4-2 \
       iproute2=6.1.0-3 \
       libgomp1=12.2.0-14+deb12u1 \

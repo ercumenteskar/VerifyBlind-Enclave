@@ -59,12 +59,16 @@ jobs:
           echo "DOCKER_IMAGE_ID=$IMAGE_ID" >> $GITHUB_ENV
           echo "=== Layer digests ==="
           docker image inspect localhost/verifyblind-enclave:latest --format '{{range .RootFS.Layers}}{{println .}}{{end}}'
+
+          # Use docker create+cp to extract files without triggering the ENTRYPOINT
+          CID=$(docker create localhost/verifyblind-enclave:latest)
           echo "=== File hashes inside image /app ==="
-          docker run --rm --entrypoint="" localhost/verifyblind-enclave:latest \
-            sh -c 'find /app -type f -exec sha256sum {} + | sort'
+          docker cp "$CID:/app" /tmp/image-app
+          find /tmp/image-app -type f -exec sha256sum {} + | sed 's|/tmp/image-app/||' | sort
           echo "=== dpkg status Installed-Time entries ==="
-          docker run --rm --entrypoint="" localhost/verifyblind-enclave:latest \
-            sh -c 'grep -A1 "^Installed-Time:" /var/lib/dpkg/status | head -20 || echo "(none found)"'
+          docker cp "$CID:/var/lib/dpkg/status" /tmp/dpkg-status
+          grep "Installed-Time:" /tmp/dpkg-status | head -20 || echo "(none found)"
+          docker rm "$CID"
 
       - name: 🏗️ Build EIF (AWS Nitro Image - ARM64)
         run: |
