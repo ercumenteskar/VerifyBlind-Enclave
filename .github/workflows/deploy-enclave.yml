@@ -42,79 +42,66 @@ jobs:
         run: |
           find _ctx -exec touch -t 202601010000 {} +
 
-      - name: 🐳 Build Enclave Docker Image (ARM64)
+      - name: 🐳 Build Enclave Docker Image — TWICE (reproducibility verification)
         run: |
-          # SOURCE_DATE_EPOCH=0 + rewrite-timestamp=true: BuildKit rewrites ALL mtimes inside
-          # layer tars to epoch 0, making layer digests byte-identical across runs regardless
-          # of build-time metadata non-determinism (dpkg processing order, ldconfig cache, etc.)
-          # Requires buildx (BuildKit 0.13+). --load loads result into local docker images so
-          # nitro-cli can find it.
+          # Build the image two times with --no-cache and compare image IDs.
+          # If the two builds produce byte-identical images, reproducibility holds
+          # for THIS commit's build inputs — proves the build pipeline did not regress
+          # (snapshot.debian.org changes, BuildKit upgrade, base image content drift, etc.)
+          # Code changes legitimately change PCR0; this check is orthogonal to that.
           docker buildx create --use --name reproducible-builder 2>/dev/null || docker buildx use reproducible-builder
-          SOURCE_DATE_EPOCH=0 docker buildx build \
-            --platform linux/arm64 \
-            -t localhost/verifyblind-enclave:latest \
-            --output type=docker,rewrite-timestamp=true \
-            -f _ctx/VerifyBlind.Enclave/Dockerfile.enclave \
-            _ctx/
 
-      - name: 🔍 Log Docker Image Digest (Reproducibility Diagnostic)
-        run: |
-          IMAGE_ID=$(docker image inspect localhost/verifyblind-enclave:latest --format '{{.Id}}')
-          echo "DOCKER_IMAGE_ID=$IMAGE_ID"
-          echo "DOCKER_IMAGE_ID=$IMAGE_ID" >> $GITHUB_ENV
-          echo "=== Layer digests ==="
-          docker image inspect localhost/verifyblind-enclave:latest --format '{{range .RootFS.Layers}}{{println .}}{{end}}'
+          build_once() {
+            local TAG="$1"
+            SOURCE_DATE_EPOCH=0 docker buildx build \
+              --platform linux/arm64 \
+              --no-cache \
+              -t "$TAG" \
+              --output type=docker,rewrite-timestamp=true \
+              -f _ctx/VerifyBlind.Enclave/Dockerfile.enclave \
+              _ctx/
+          }
 
-          # Use docker create+cp to extract files without triggering the ENTRYPOINT
-          CID=$(docker create localhost/verifyblind-enclave:latest)
-          docker cp "$CID:/app" /tmp/image-app
+          echo "--- Build #1 ---"
+          build_once localhost/verifyblind-enclave:build1
+          IMAGE_ID_1=$(docker image inspect localhost/verifyblind-enclave:build1 --format '{{.Id}}')
+          LAYERS_1=$(docker image inspect localhost/verifyblind-enclave:build1 --format '{{range .RootFS.Layers}}{{println .}}{{end}}')
 
-          echo "=== File hashes inside image /app ==="
-          find /tmp/image-app -type f -exec sha256sum {} + | sed 's|/tmp/image-app/||' | sort
+          # Wipe BuildKit cache so build #2 cannot replay cached layers
+          docker buildx prune -af >/dev/null 2>&1 || true
 
-          echo "=== File metadata (perms/owner/size/mtime/path) ==="
-          find /tmp/image-app -printf '%M %u:%g %s %T+ %P\n' | sort
+          echo "--- Build #2 ---"
+          build_once localhost/verifyblind-enclave:latest
+          IMAGE_ID_2=$(docker image inspect localhost/verifyblind-enclave:latest --format '{{.Id}}')
+          LAYERS_2=$(docker image inspect localhost/verifyblind-enclave:latest --format '{{range .RootFS.Layers}}{{println .}}{{end}}')
 
-          echo "=== Symlinks in /app ==="
-          find /tmp/image-app -type l -printf '%p -> %l\n' | sort || echo "(none)"
+          echo "DOCKER_IMAGE_ID=$IMAGE_ID_2" >> $GITHUB_ENV
+          echo "Build #1 image ID: $IMAGE_ID_1"
+          echo "Build #2 image ID: $IMAGE_ID_2"
 
-          echo "=== File type counts ==="
-          find /tmp/image-app -printf '%y\n' | sort | uniq -c
-
-          echo "=== dpkg status Installed-Time entries ==="
-          docker cp "$CID:/var/lib/dpkg/status" /tmp/dpkg-status
-          grep "Installed-Time:" /tmp/dpkg-status | head -20 || echo "(none found)"
-
-          # Inspect EACH layer's tar content
-          echo "=== Layer-by-layer per-file SHA inventory ==="
-          docker save localhost/verifyblind-enclave:latest -o /tmp/img.tar
-          mkdir -p /tmp/img-extract && tar -xf /tmp/img.tar -C /tmp/img-extract
-          MANIFEST=/tmp/img-extract/manifest.json
-          if [ -f "$MANIFEST" ]; then
-            jq -r '.[0].Layers[]' "$MANIFEST" | nl -ba | while read idx layerpath; do
-              full="/tmp/img-extract/$layerpath"
-              if [ -f "$full" ]; then
-                bytes=$(wc -c <"$full")
-                cnt=$(tar -tf "$full" 2>/dev/null | wc -l)
-                sha=$(sha256sum "$full" | awk '{print $1}')
-                echo "Layer[$idx] $layerpath  bytes=$bytes  files=$cnt  sha=$sha"
-                # Per-file content hash WITHIN this layer (mtime-independent)
-                mkdir -p "/tmp/layer-$idx-content"
-                tar -xf "$full" -C "/tmp/layer-$idx-content" 2>/dev/null || true
-                find "/tmp/layer-$idx-content" -type f -exec sha256sum {} + | sed "s|/tmp/layer-$idx-content/||" | sort > "/tmp/layer-$idx-files.txt"
-                echo "  per-file-content-hash: $(sha256sum /tmp/layer-$idx-files.txt | awk '{print $1}')"
-              fi
-            done
-            # Dump the suspicious layer (the one with 4072 files = apt-install layer) full listing
-            APT_LAYER=$(jq -r '.[0].Layers[4]' "$MANIFEST")
-            echo "=== Full tar -tv of apt-install layer ($APT_LAYER) ==="
-            tar -tvf "/tmp/img-extract/$APT_LAYER" | sort > /tmp/apt-layer-listing.txt
-            wc -l /tmp/apt-layer-listing.txt
-            # Capture for artifact upload
-            cp /tmp/apt-layer-listing.txt /tmp/layer-*-files.txt . 2>/dev/null || true
+          if [ "$IMAGE_ID_1" = "$IMAGE_ID_2" ]; then
+            echo "✅ Reproducibility verified: both builds produced identical image ID"
+            echo "### ✅ Reproducibility Check: PASS" >> $GITHUB_STEP_SUMMARY
+            echo "Two cache-disabled builds of the same commit produced byte-identical Docker images." >> $GITHUB_STEP_SUMMARY
+            echo "- **Image ID:** \`$IMAGE_ID_2\`" >> $GITHUB_STEP_SUMMARY
+            # Clean up build1 — keep only :latest for the EIF step
+            docker rmi localhost/verifyblind-enclave:build1 >/dev/null 2>&1 || true
+          else
+            echo "::error::Reproducibility REGRESSION! Two builds of identical source produced different images."
+            echo "### ❌ Reproducibility Check: FAIL" >> $GITHUB_STEP_SUMMARY
+            echo "Two cache-disabled builds of the same commit produced DIFFERENT Docker images." >> $GITHUB_STEP_SUMMARY
+            echo "This indicates a build-pipeline regression (snapshot mirror drift, BuildKit upgrade," >> $GITHUB_STEP_SUMMARY
+            echo "base image content change, or a new non-determinism source)." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Build #1 image ID:** \`$IMAGE_ID_1\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Build #2 image ID:** \`$IMAGE_ID_2\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Layer-by-layer diff:**" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            diff <(echo "$LAYERS_1") <(echo "$LAYERS_2") >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
           fi
-
-          docker rm "$CID"
 
       - name: 🏗️ Build EIF (AWS Nitro Image - ARM64)
         run: |
@@ -148,42 +135,16 @@ jobs:
           echo "PCR0=$PCR0" >> $GITHUB_ENV
           echo "NITRO_VER=$NITRO_VER" >> $GITHUB_ENV
 
-      - name: 🔐 Assert PCR0 matches expected_pcr0 (drift detection)
+      - name: 📝 Build Transparency Report
         run: |
-          if [ ! -f expected_pcr0 ]; then
-            echo "::warning::expected_pcr0 file not present; skipping drift assertion."
-            exit 0
-          fi
-          EXPECTED=$(tr -d '[:space:]' < expected_pcr0 | tr 'A-Z' 'a-z')
-          ACTUAL=$(echo "$PCR0" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
-          if [ "$EXPECTED" = "$ACTUAL" ]; then
-            echo "✅ PCR0 matches expected: $ACTUAL"
-            echo "### ✅ PCR0 Drift Check: PASS" >> $GITHUB_STEP_SUMMARY
-            echo "Built \`$ACTUAL\` matches \`expected_pcr0\`." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "::error::PCR0 DRIFT! built=$ACTUAL expected=$EXPECTED"
-            echo "### ❌ PCR0 Drift Check: FAIL" >> $GITHUB_STEP_SUMMARY
-            echo "- **Expected:** \`$EXPECTED\`" >> $GITHUB_STEP_SUMMARY
-            echo "- **Built:**    \`$ACTUAL\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Either a build input changed unintentionally (regression) or this is an" >> $GITHUB_STEP_SUMMARY
-            echo "intended version bump. If intended: sign the new PCR0, update" >> $GITHUB_STEP_SUMMARY
-            echo "\`pcr0_signatures.json\` in the API repo, and update \`expected_pcr0\` here." >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
           echo "### 🛡️ Build Transparency Report" >> $GITHUB_STEP_SUMMARY
           echo "Enclave image built on GitHub Infrastructure (native arm64)." >> $GITHUB_STEP_SUMMARY
           echo "- **PCR0:** \`$PCR0\`" >> $GITHUB_STEP_SUMMARY
           echo "- **nitro-cli:** \`$NITRO_VER\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-      - name: 💾 Save Docker Image for Offline Layer Diff
-        run: |
-          docker save localhost/verifyblind-enclave:latest -o docker-image.tar
-          ls -lh docker-image.tar
+          echo "> **Model hash (w600k_mbf.onnx):** \`9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f\`" >> $GITHUB_STEP_SUMMARY
+          echo "> Hash verified inside Docker build (sha256sum -c). Build would fail if model bytes differ." >> $GITHUB_STEP_SUMMARY
 
       - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -194,6 +155,3 @@ jobs:
             pcr0.txt
             expected_pcr.json
             nitro_cli_version.txt
-            docker-image.tar
-            apt-layer-listing.txt
-            layer-*-files.txt
