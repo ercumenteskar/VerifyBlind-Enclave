@@ -10,6 +10,8 @@ jobs:
     name: Build Enclave & Extract PCR0
     # Native arm64 runner — no QEMU; matches Graviton EC2 architecture
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write  # needed for gh release create
 
     steps:
       - name: 📥 Checkout Code (with LFS for ONNX model)
@@ -146,12 +148,46 @@ jobs:
           # echo "> **Model hash (w600k_mbf.onnx):** \`9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f\`" >> $GITHUB_STEP_SUMMARY
           # echo "> Hash verified inside Docker build (sha256sum -c). Build would fail if model bytes differ." >> $GITHUB_STEP_SUMMARY
 
-      - name: 📤 Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: enclave-bundle
-          path: |
-            enclave.eif
-            pcr0.txt
-            expected_pcr.json
+      - name: 📦 Publish as GitHub Release (fast CDN-backed downloads, persists until deleted)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="enclave-build-${{ github.run_number }}"
+          TITLE="Enclave EIF — Build #${{ github.run_number }} ($(echo ${{ github.sha }} | cut -c1-7))"
+          BODY="**PCR0:** \`$PCR0\`
+          **Commit:** [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+          **nitro-cli:** $NITRO_VER
+          **Built at:** $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+          ---
+
+          Bu release reproducible build pipeline'ından üretildi. Aynı commit'ten her build
+          aynı PCR0'ı üretir (workflow içinde double-build ile doğrulandı).
+
+          ## Files
+          - \`enclave.eif\` — Nitro Enclave Image File, EC2 Graviton'a yüklenir
+          - \`pcr0.txt\` — Attestation PCR0 değeri (hex)
+          - \`expected_pcr.json\` — Build metadata (PCR0, commit, nitro-cli sürümü, build zamanı)
+          - \`nitro_cli_version.txt\` — Build için kullanılan nitro-cli sürümü"
+
+          # Replace existing release with same tag (idempotent on re-runs of same build number)
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$BODY" \
+            --repo "${{ github.repository }}" \
+            enclave.eif \
+            pcr0.txt \
+            expected_pcr.json \
             nitro_cli_version.txt
+
+          REL_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          echo "✅ Release published: $REL_URL"
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifacts (GitHub Release)" >> $GITHUB_STEP_SUMMARY
+          echo "Download from: <$REL_URL>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Or via gh CLI:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "gh release download $TAG -R ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
