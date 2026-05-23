@@ -81,9 +81,9 @@ jobs:
 
           if [ "$IMAGE_ID_1" = "$IMAGE_ID_2" ]; then
             echo "✅ Reproducibility verified: both builds produced identical image ID"
-            echo "### ✅ Reproducibility Check: PASS" >> $GITHUB_STEP_SUMMARY
-            echo "Two cache-disabled builds of the same commit produced byte-identical Docker images." >> $GITHUB_STEP_SUMMARY
-            echo "- **Image ID:** \`$IMAGE_ID_2\`" >> $GITHUB_STEP_SUMMARY
+            # echo "### ✅ Reproducibility Check: PASS" >> $GITHUB_STEP_SUMMARY
+            # echo "Two cache-disabled builds of the same commit produced byte-identical Docker images." >> $GITHUB_STEP_SUMMARY
+            # echo "- **Image ID:** \`$IMAGE_ID_2\`" >> $GITHUB_STEP_SUMMARY
             # Clean up build1 — keep only :latest for the EIF step
             docker rmi localhost/verifyblind-enclave:build1 >/dev/null 2>&1 || true
           else
@@ -143,8 +143,8 @@ jobs:
           echo "- **nitro-cli:** \`$NITRO_VER\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> **Model hash (w600k_mbf.onnx):** \`9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f\`" >> $GITHUB_STEP_SUMMARY
-          echo "> Hash verified inside Docker build (sha256sum -c). Build would fail if model bytes differ." >> $GITHUB_STEP_SUMMARY
+          # echo "> **Model hash (w600k_mbf.onnx):** \`9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f\`" >> $GITHUB_STEP_SUMMARY
+          # echo "> Hash verified inside Docker build (sha256sum -c). Build would fail if model bytes differ." >> $GITHUB_STEP_SUMMARY
 
       - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
