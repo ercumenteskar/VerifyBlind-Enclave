@@ -67,12 +67,43 @@ jobs:
 
           # Use docker create+cp to extract files without triggering the ENTRYPOINT
           CID=$(docker create localhost/verifyblind-enclave:latest)
-          echo "=== File hashes inside image /app ==="
           docker cp "$CID:/app" /tmp/image-app
+
+          echo "=== File hashes inside image /app ==="
           find /tmp/image-app -type f -exec sha256sum {} + | sed 's|/tmp/image-app/||' | sort
+
+          echo "=== File metadata (perms/owner/size/mtime/path) ==="
+          find /tmp/image-app -printf '%M %u:%g %s %T+ %P\n' | sort
+
+          echo "=== Symlinks in /app ==="
+          find /tmp/image-app -type l -printf '%p -> %l\n' | sort || echo "(none)"
+
+          echo "=== File type counts ==="
+          find /tmp/image-app -printf '%y\n' | sort | uniq -c
+
           echo "=== dpkg status Installed-Time entries ==="
           docker cp "$CID:/var/lib/dpkg/status" /tmp/dpkg-status
           grep "Installed-Time:" /tmp/dpkg-status | head -20 || echo "(none found)"
+
+          # Inspect Layer 5 raw tar content
+          echo "=== Layer 5 raw tar listing (first 50 + size summary) ==="
+          docker save localhost/verifyblind-enclave:latest -o /tmp/img.tar
+          mkdir -p /tmp/img-extract && tar -xf /tmp/img.tar -C /tmp/img-extract
+          # Layer 5 = 5th non-empty layer in manifest order
+          MANIFEST=/tmp/img-extract/manifest.json
+          if [ -f "$MANIFEST" ]; then
+            LAYER5=$(jq -r '.[0].Layers[4]' "$MANIFEST")
+            echo "Layer 5 path: $LAYER5"
+            ls -la "/tmp/img-extract/$LAYER5"
+            tar -tvf "/tmp/img-extract/$LAYER5" | head -50
+            echo "--- Layer 5 file count ---"
+            tar -tvf "/tmp/img-extract/$LAYER5" | wc -l
+            echo "--- Layer 5 mtime samples ---"
+            tar -tvf "/tmp/img-extract/$LAYER5" | awk '{print $4, $5}' | sort -u | head -10
+            echo "--- Layer 5 sha256 ---"
+            sha256sum "/tmp/img-extract/$LAYER5"
+          fi
+
           docker rm "$CID"
 
       - name: 🏗️ Build EIF (AWS Nitro Image - ARM64)
