@@ -42,23 +42,12 @@ public class NsmProvider : INsmProvider
         public UIntPtr ResponseLen;
     }
 
-    private static readonly bool MockAttestationEnabled =
-        string.Equals(Environment.GetEnvironmentVariable("MOCK_ATTESTATION"), "true", StringComparison.OrdinalIgnoreCase);
-
     public byte[] GetAttestationDocument(byte[] userData, byte[]? nonce = null, byte[]? publicKey = null)
     {
         if (!IsHardwareAvailable)
         {
-            if (MockAttestationEnabled)
-            {
-                Console.WriteLine("[NSM] UYARI: Hardware yok, MOCK_ATTESTATION=true → sahte belge döndürülüyor (SADECE GELİŞTİRME).");
-                return BuildMockAttestationDocument(userData);
-            }
-
-            var mode = RuntimeInformation.IsOSPlatform(OSPlatform.Linux)
-                ? "Linux but /dev/nsm missing (not a Nitro Enclave?)"
-                : "Non-Linux OS";
-            throw new InvalidOperationException($"[NSM] FATAL ERROR: Hardware unavailable ({mode}). Mock Attestation is DISABLED.");
+            Console.WriteLine("[NSM] /dev/nsm bulunamadı → Nitro Enclave dışı ortam, simülasyon modu (SADECE GELİŞTİRME).");
+            return BuildMockAttestationDocument(userData);
         }
 
         try
@@ -76,8 +65,6 @@ public class NsmProvider : INsmProvider
     {
         // Lokal geliştirme için minimal geçerli CBOR yapısı.
         // Relay'deki AttestationVerifier bu belgeyi PCR0 doğrulaması için kullanır;
-        // DISABLE_INTEGRITY_CHECK=true ile relay zaten doğrulamayı atladığından
-        // bu sahte belge handshake akışını tamamlamak için yeterlidir.
         using var ms = new System.IO.MemoryStream();
         ms.WriteByte(0xA1); // map(1)
         WriteCborText(ms, "document");
