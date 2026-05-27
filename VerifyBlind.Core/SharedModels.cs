@@ -187,6 +187,9 @@ public class LoginRequest
     [JsonPropertyName("client_ipv6")]
     public string? ClientIpV6 { get; set; }
 
+    [JsonPropertyName("is_demo")]
+    public bool IsDemo { get; set; } = false;
+
     // --- Internal API-only fields (not sent to Enclave) ---
     [JsonIgnore]
     public string? CallbackUrl { get; set; }
