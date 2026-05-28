@@ -90,6 +90,14 @@ public class RegistrationRequest
     public string CountryIsoCode { get; set; } = string.Empty;
 }
 
+// Demo Registration Request (Phone -> Relay -> Enclave)
+// NFC/biometric verisi olmadan, enklavda hardcoded demo veriyle gerçek imzalı ticket üretir.
+public class DemoRegisterRequest
+{
+    [JsonPropertyName("user_pub_key")]
+    public string UserPubKey { get; set; } = string.Empty;
+}
+
 // Ticket
 public class TicketPayload
 {
@@ -186,9 +194,6 @@ public class LoginRequest
     /// <summary>Relay API tarafından set edilir. Mobil istemcinin IPv6 adresi (ip6 validation için).</summary>
     [JsonPropertyName("client_ipv6")]
     public string? ClientIpV6 { get; set; }
-
-    [JsonPropertyName("is_demo")]
-    public bool IsDemo { get; set; } = false;
 
     // --- Internal API-only fields (not sent to Enclave) ---
     [JsonIgnore]

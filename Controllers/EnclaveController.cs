@@ -103,6 +103,32 @@ public class EnclaveController : ControllerBase
         }
     }
 
+    [HttpPost("demo-register")]
+    public async Task<IActionResult> DemoRegister([FromBody] DemoRegisterRequest request)
+    {
+        var diag = new VerifyBlind.Enclave.Services.DiagLog();
+        try
+        {
+            var result = await _service.DemoRegisterAsync(request.UserPubKey, diag);
+            diag.Info($"Toplam Enclave süresi: {diag.TotalMs}ms");
+            return Ok(new
+            {
+                encrypted_ticket = result.ticket,
+                face_similarity_score = Math.Round(result.faceScore * 100, 1),
+                relay_card_id = result.cardId,
+                relay_test_log = result.testLogJson,
+                enclave_diag = diag.Entries
+            });
+        }
+        catch (Exception ex)
+        {
+            diag.Info($"Toplam Enclave süresi: {diag.TotalMs}ms");
+            Console.WriteLine($"[Enclave Controller] DEMO REGISTER ERROR ({ex.GetType().Name}): {ex}");
+            var statusCode = ex is RegistrationException ? 400 : 500;
+            return StatusCode(statusCode, new { error = ex.Message, enclave_diag = diag.Entries });
+        }
+    }
+
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest request)
     {

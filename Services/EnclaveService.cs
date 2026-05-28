@@ -352,6 +352,116 @@ public class EnclaveService
         }
     }
 
+    /// <summary>
+    /// Demo Mode için hardcoded veriyle gerçek imzalı ticket üretir.
+    /// NFC/biometrik adımları atlanır; ID üretimi, imza ve şifreleme normal akıştaki gibi gerçek HSM ile yapılır.
+    /// Tek farkı: SecurePayload yok, kimlik verisi enklavın içine gömülü.
+    /// </summary>
+    public async Task<(string ticket, float faceScore, string cardId, string? testLogJson)> DemoRegisterAsync(string userPubKey, DiagLog diag)
+    {
+        diag.Info($"[DEMO] Kayıt başladı. UserPubKey={userPubKey.Length}ch");
+        Console.WriteLine($"[Enclave] DEMO kayıt isteği alındı. UserPubKey uzunluğu: {userPubKey.Length}");
+
+        if (string.IsNullOrEmpty(userPubKey))
+            throw new RegistrationException(RegistrationStep.RsaDecrypt, "Demo kayıt için kullanıcı public key gereklidir.");
+
+        // Hardcoded demo identity (gerçek bir kart yok — TCKN/SOD hash sabit)
+        const string demoTckn = "00000000000";
+        const string demoSodHashHex = "demo_sod_hash_fixed_for_card_id_derivation";
+
+        var ticketPayload = new TicketPayload
+        {
+            TCKN = demoTckn,
+            Ad = "Demo",
+            Soyad = "Kullanıcı",
+            DogumTarihi = new DateTime(1992, 1, 1),
+            SeriNo = "A12345678",
+            GecerlilikTarihi = new DateTime(2030, 12, 31),
+            Cinsiyet = "E",
+            Uyruk = "TUR",
+            UserPubKey = userPubKey,
+            CountryIsoCode = "TUR",
+            DocumentType = "ID"
+        };
+
+        // --- ID Generation (real KMS HMAC — same algorithm as production) ---
+        string personId, cardId;
+        try
+        {
+            diag.Begin("Demo ID Generation");
+            var personHmacTask = _kms.ComputeHmacAsync($"{demoTckn}_Person_id");
+            var cardHmacTask = _kms.ComputeHmacAsync($"{demoSodHashHex}_Card_id");
+
+            var pHmac = await personHmacTask;
+            personId = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(Convert.FromBase64String(pHmac))
+            ).ToLowerInvariant();
+
+            var cHmac = await cardHmacTask;
+            cardId = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(Convert.FromBase64String(cHmac))
+            ).ToLowerInvariant();
+
+            ticketPayload.PersonId = personId;
+            ticketPayload.CardId = cardId;
+
+            diag.Ok("Demo ID Generation", $"PersonId={personId[..8]}.., CardId={cardId[..8]}..");
+        }
+        catch (Exception ex)
+        {
+            diag.Fail("Demo ID Generation", ex.Message);
+            throw new RegistrationException(RegistrationStep.IdGeneration, ex.Message, ex);
+        }
+
+        // --- Ticket Signing (real HSM signature) ---
+        SignedTicket signedTicket;
+        try
+        {
+            diag.Begin("Demo Ticket Sign");
+            var signature = await _kms.SignTicketAsync(ticketPayload);
+            signedTicket = new SignedTicket
+            {
+                Payload = ticketPayload,
+                Signature = signature
+            };
+            diag.Ok("Demo Ticket Sign");
+        }
+        catch (Exception ex)
+        {
+            diag.Fail("Demo Ticket Sign", ex.Message);
+            throw new RegistrationException(RegistrationStep.TicketSigning, ex.Message, ex);
+        }
+
+        // --- Response Encryption (hybrid: AES blob + RSA-wrapped key with user's pub key) ---
+        try
+        {
+            diag.Begin("Demo Response Encrypt");
+            var bundledContent = new
+            {
+                ticket = signedTicket,
+                person_id = personId,
+                card_id = cardId
+            };
+            var bundledJson = JsonSerializer.Serialize(bundledContent);
+
+            var (aesBlob, aesKey, _) = CryptoUtils.AesEncrypt(bundledJson);
+            // OaepSha1: Android Keystore TEE does not support MGF1-SHA256 on all devices
+            var encAesKey = CryptoUtils.RsaEncryptOaepSha1(aesKey, userPubKey);
+            var hybridResponse = new
+            {
+                enc_key = encAesKey,
+                blob = aesBlob
+            };
+            diag.Ok("Demo Response Encrypt");
+            return (JsonSerializer.Serialize(hybridResponse), 1.0f, cardId, null);
+        }
+        catch (Exception ex)
+        {
+            diag.Fail("Demo Response Encrypt", ex.Message);
+            throw new RegistrationException(RegistrationStep.ResponseEncryption, ex.Message, ex);
+        }
+    }
+
     public async Task<string> LoginAsync(LoginRequest request, DiagLog diag)
     {
         try {
