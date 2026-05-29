@@ -89,7 +89,6 @@ public class EnclaveController : ControllerBase
                 encrypted_ticket = result.ticket,
                 face_similarity_score = Math.Round(result.faceScore * 100, 1),
                 relay_card_id = result.cardId,         // plaintext for relay block check only
-                relay_test_log = result.testLogJson,
                 enclave_diag = diag.Entries
             });
         }
@@ -116,7 +115,6 @@ public class EnclaveController : ControllerBase
                 encrypted_ticket = result.ticket,
                 face_similarity_score = Math.Round(result.faceScore * 100, 1),
                 relay_card_id = result.cardId,
-                relay_test_log = result.testLogJson,
                 enclave_diag = diag.Entries
             });
         }

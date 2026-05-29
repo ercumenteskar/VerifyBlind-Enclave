@@ -75,7 +75,7 @@ public class EnclaveService
         return new LoginHandshakeResponse { AttestationDocument = attestDoc };
     }
 
-    public async Task<(string ticket, float faceScore, string cardId, string? testLogJson)> RegisterAsync(RegistrationRequest request, DiagLog diag)
+    public async Task<(string ticket, float faceScore, string cardId)> RegisterAsync(RegistrationRequest request, DiagLog diag)
     {
         diag.Info($"Kayıt başladı. EncKey={request.EncryptedKey.Length}ch, Blob={request.AesBlob.Length}ch");
         Console.WriteLine($"[Enclave] Kayıt isteği alındı. Şifreli Anahtar Uzunluğu: {request.EncryptedKey.Length}, Blob Uzunluğu: {request.AesBlob.Length}");
@@ -272,35 +272,6 @@ public class EnclaveService
             throw new RegistrationException(RegistrationStep.IdGeneration, "ERR_ID_GENERATION", ex.Message);
         }
 
-        // --- [TEST-LOG] Full identity dump for pre-prod testing ---
-        string? regTestLogJson = null;
-        if (TestLoggingEnabled)
-        {
-            var testLog = new
-            {
-                event_type = "registration",
-                timestamp  = DateTimeOffset.UtcNow.ToString("O"),
-                identity   = new
-                {
-                    tckn              = ticketPayload.TCKN,
-                    ad                = ticketPayload.Ad,
-                    soyad             = ticketPayload.Soyad,
-                    dogum_tarihi      = ticketPayload.DogumTarihi.ToString("yyyy-MM-dd"),
-                    seri_no           = ticketPayload.SeriNo,
-                    gecerlilik_tarihi = ticketPayload.GecerlilikTarihi.ToString("yyyy-MM-dd"),
-                    cinsiyet          = ticketPayload.Cinsiyet,
-                    uyruk             = ticketPayload.Uyruk,
-                    belge_tipi        = ticketPayload.DocumentType,
-                    ulke_kodu         = ticketPayload.CountryIsoCode,
-                    person_id         = personId,
-                    card_id           = cardId
-                },
-                face_score = Math.Round(faceScore * 100, 2)
-            };
-            regTestLogJson = JsonSerializer.Serialize(testLog);
-            Console.WriteLine($"[TEST-LOG] KAYIT: {regTestLogJson}");
-        }
-
         // --- Step 9: Ticket Signing (IDs already embedded above) ---
         SignedTicket signedTicket;
         try
@@ -343,7 +314,7 @@ public class EnclaveService
             };
             
             diag.Ok("Response Encrypt");
-            return (JsonSerializer.Serialize(hybridResponse), faceScore, cardId, regTestLogJson);
+            return (JsonSerializer.Serialize(hybridResponse), faceScore, cardId);
         }
         catch (Exception ex)
         {
@@ -358,7 +329,7 @@ public class EnclaveService
     /// NFC/biometrik adımları atlanır; ID üretimi, imza ve şifreleme normal akıştaki gibi gerçek HSM ile yapılır.
     /// Tek farkı: SecurePayload yok, kimlik verisi enklavın içine gömülü.
     /// </summary>
-    public async Task<(string ticket, float faceScore, string cardId, string? testLogJson)> DemoRegisterAsync(string userPubKey, DiagLog diag)
+    public async Task<(string ticket, float faceScore, string cardId)> DemoRegisterAsync(string userPubKey, DiagLog diag)
     {
         diag.Info($"[DEMO] Kayıt başladı. UserPubKey={userPubKey.Length}ch");
         Console.WriteLine($"[Enclave] DEMO kayıt isteği alındı. UserPubKey uzunluğu: {userPubKey.Length}");
@@ -454,7 +425,7 @@ public class EnclaveService
                 blob = aesBlob
             };
             diag.Ok("Demo Response Encrypt");
-            return (JsonSerializer.Serialize(hybridResponse), 1.0f, cardId, null);
+            return (JsonSerializer.Serialize(hybridResponse), 1.0f, cardId);
         }
         catch (Exception ex)
         {
@@ -773,44 +744,13 @@ string? partnerId = null;
         var consentReceiptData = $"{request.Nonce}:{partnerId}:{string.Join(",", scopesList)}:{string.Join(",", resultsBool.Select(kv => $"{kv.Key}={kv.Value}"))}";
         var consentEnclaveSig = _enclaveKeys.SignDataWithEnclaveKey(consentReceiptData);
 
-        string? loginTestLogJson = null;
-        if (TestLoggingEnabled)
-        {
-            var p = signedTicket.Payload;
-            loginTestLogJson = JsonSerializer.Serialize(new
-            {
-                event_type  = "login",
-                timestamp   = DateTimeOffset.UtcNow.ToString("O"),
-                partner_id  = partnerId,
-                identity    = new
-                {
-                    tckn              = p.TCKN,
-                    ad                = p.Ad,
-                    soyad             = p.Soyad,
-                    dogum_tarihi      = p.DogumTarihi.ToString("yyyy-MM-dd"),
-                    seri_no           = p.SeriNo,
-                    gecerlilik_tarihi = p.GecerlilikTarihi.ToString("yyyy-MM-dd"),
-                    cinsiyet          = p.Cinsiyet,
-                    uyruk             = p.Uyruk,
-                    belge_tipi        = p.DocumentType,
-                    ulke_kodu         = p.CountryIsoCode,
-                    person_id         = personId,
-                    card_id           = loginCardId,
-                    user_id           = userId
-                },
-                validations_result = validationsOutput
-            });
-            Console.WriteLine($"[TEST-LOG] GİRİŞ: {loginTestLogJson}");
-        }
-
         var relayMetadata = new
         {
             card_id          = loginCardId,   // block check only — DB'ye yazılmaz
             scopes           = scopesList,
             results          = resultsBool,
             consent_version  = "1.0",
-            enclave_sig      = consentEnclaveSig,
-            test_log         = loginTestLogJson
+            enclave_sig      = consentEnclaveSig
         };
 
         // e. Final response: encrypted_response (partner) + relay_metadata (Relay) + nationality (nonce_ledger)
@@ -2055,8 +1995,6 @@ TCKN = primaryId, // Will be empty for non-TUR or missing TCKN
         if (value.Length <= 4) return "**" + value.Length + "**"; // Too short to mask first/last 2
         return value.Substring(0, 2) + new string('*', value.Length - 4) + value.Substring(value.Length - 2);
     }
-
-    private const bool TestLoggingEnabled = true;
 
     /// <summary>
     /// Verilen string'i IPv6 /64 CIDR prefix'e dönüştürür.
